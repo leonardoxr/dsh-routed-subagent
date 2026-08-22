@@ -1,0 +1,22 @@
+# dsh bundle patch: inserts the routed subagent tool into a profile's layer stack.
+#
+# The row requires `tiers` configuration before it will load — set it in your
+# own patch layer by targeting row id "routed-subagent" (a later layer replaces
+# this row's config wholesale). Minimal example:
+#
+# - id: routed-subagent
+#   config:
+#     tiers:
+#       fast:
+#         provider: deepseek
+#         model: deepseek-chat
+#         maxTokens: 8192
+#         guidance: 'Lookups, mechanical edits, single-file changes, summarization.'
+#       deep:
+#         provider: deepseek
+#         model: deepseek-reasoner
+#         maxTokens: 65536
+#         guidance: 'Multi-step reasoning, architecture decisions, hard debugging.'
+- insert:
+    - id: routed-subagent
+      name: 'dsh-routed-subagent'
