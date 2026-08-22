@@ -11,15 +11,19 @@ changes; works on CLI, plain `dsh web`, and community desktop distributions.
 
 ## Configure in the app
 
-After install, **Settings → Plugins → Routed subagent** edits the tier table
-in place — a JSON editor over the `tiers` mapping with staged save, reload,
-and reset-to-composition. Saved edits apply to new delegations immediately;
-no restart. Structural identity (`toolName`, `providerName`, `maxDepth`)
-stays in composition.
+After install, **Settings → Plugins → Routed subagent** opens a structured
+tier builder. Provider and model choices come from the same live Host catalog
+as Chat, and each model exposes its adapter-owned reasoning levels. Each tier
+also has dedicated controls for its name, token cap, persona, routing guidance,
+and child-delegation allowlist. Tiers can be added, duplicated, reordered, or removed without
+editing JSON. Changes are staged until saved, and the whole table can be
+discarded or reset to composition. Saved edits apply to new delegations
+immediately; no restart. Structural identity (`toolName`, `providerName`,
+`maxDepth`) stays in composition.
 
 The editor uses the Harness client settings-scope contract (`getSnapshot`,
-`set`, and `unset`), so it requires the browser half bundled with current DSH
-releases.
+`subscribe`, `set`, and `unset`), so it requires the browser half bundled with
+current DSH releases.
 
 ## Install
 ```sh
