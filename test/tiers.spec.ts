@@ -2,15 +2,15 @@ import { describe, expect, it } from 'vitest'
 import { allowedTiersFor, parseTierTable, rootTierNames } from '../src/tiers.ts'
 
 const table = parseTierTable({
-  fast: { provider: 'openai-codex', model: 'gpt-5-mini', spawnable: [] },
-  deep: { provider: 'openai-codex', model: 'gpt-5.2', spawnable: ['fast'] },
-  cheap: { provider: 'deepseek', model: 'deepseek-chat' },
+  fast: { provider: 'openai-codex', model: 'gpt-5.4-mini', spawnable: [] },
+  deep: { provider: 'openai-codex', model: 'gpt-5.6-sol', spawnable: ['fast'] },
+  cheap: { provider: 'openai-codex', model: 'gpt-5.6-luna' },
 })
 
 describe('parseTierTable', () => {
   it('accepts a valid table and defaults spawnable to none', () => {
     expect(table.fast?.spawnable).toEqual([])
-    expect(table.deep?.model).toBe('gpt-5.2')
+    expect(table.deep?.model).toBe('gpt-5.6-sol')
   })
 
   it('fails loud on absent, empty, or malformed tables', () => {

@@ -18,7 +18,7 @@ import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import { ReasoningEffortId, type ContentBlock } from '@deepseek-ai/dsh-llm'
-import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
+import { settleRun, type SubagentProvider, type SubagentResult, type SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { allowedTiersFor, parseTierTable, rootTierNames, type TierTable } from './tiers.ts'
 
 /** Settings namespace carrying the user-editable tier table. */
@@ -73,6 +73,27 @@ interface ForegroundToolResult {
   readonly runId: SubagentRun['id']
   readonly tier: string
   readonly output: JsonValue[]
+}
+
+type BackgroundJobOutcome = Awaited<ReturnType<typeof settleRun>>
+
+/**
+ * Settle a background start into the jobs registry's required terminal outcome.
+ * Startup failures never reject the producer promise; cancellation maps to
+ * `killed`, while every other startup failure becomes `failed`.
+ */
+export async function settleBackgroundStart(
+  start: Promise<SubagentRun>,
+  signal: AbortSignal,
+  track: (run: SubagentRun) => SubagentRun = run => run,
+): Promise<BackgroundJobOutcome> {
+  try {
+    return await settleRun(track(await start))
+  } catch (error) {
+    return signal.aborted && !(error instanceof AggregateError)
+      ? { status: 'killed' }
+      : { status: 'failed', detail: String(error) }
+  }
 }
 /**
  * Collect and release one foreground run without letting disposal replace an
@@ -317,22 +338,7 @@ export function apply(ctx: Context, config: Config): void {
                 cancel: (reason?: string) => {
                   controller.abort(reason ?? 'background routed subagent task killed')
                 },
-                done: (async () => {
-                  try {
-                    const started = await start
-                    track(started)
-                    // Settle the child turn work; the result value belongs to
-                    // job_output consumers through the child session instead.
-                    await started.result
-                  } catch {
-                    // done must not reject; infrastructure faults surface
-                    // through job state, not the producer promise.
-                  } finally {
-                    try {
-                      (await start).dispose()
-                    } catch { /* disposal best-effort after settlement */ }
-                  }
-                })(),
+                done: settleBackgroundStart(start, controller.signal, track),
               }
             },
           })
