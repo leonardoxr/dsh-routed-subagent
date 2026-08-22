@@ -14,10 +14,10 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import type { ContentBlock } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { allowedTiersFor, parseTierTable, rootTierNames, type TierTable } from './tiers.ts'
 
@@ -72,7 +72,7 @@ interface ForegroundToolResult {
   readonly kind: 'foreground'
   readonly runId: SubagentRun['id']
   readonly tier: string
-  readonly output: unknown[]
+  readonly output: JsonValue[]
 }
 /**
  * Collect and release one foreground run without letting disposal replace an
@@ -94,7 +94,8 @@ async function settleForegroundRun(run: SubagentRun, tier: string): Promise<Fore
           kind: 'foreground' as const,
           runId: run.id,
           tier,
-          output: result.output as unknown[],
+          // Content blocks cross the tool boundary as their JSON wire shape.
+          output: result.output as unknown as JsonValue[],
         }
       }
       // Non-completed means partial output is not success, but the preserved
@@ -187,7 +188,7 @@ export function apply(ctx: Context, config: Config): void {
     const tierName = childTiers.get(_payload.agent)
     const effort = tierName === undefined ? undefined : tiers[tierName]?.reasoningEffort
     if (effort === undefined || call.reasoningEffort === effort) return call
-    return { ...call, reasoningEffort: effort }
+    return { ...call, reasoningEffort: ReasoningEffortId(effort) }
   })
   const mount = (provider: SubagentProvider): void => {
     if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) {
