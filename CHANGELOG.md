@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Ship the client bundle under both names the two consumers resolve:
+  `client.js` (the loader's serve path) and `client.cjs` (the Host-side
+  registry's disk resolution). 0.2.1 broke boot with ENOENT on `client.cjs`.
 ## 0.2.1
 
 - Fixed the module-loader wrapper: the factory receives only `require`, so it

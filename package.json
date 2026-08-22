@@ -1,6 +1,6 @@
 {
   "name": "dsh-routed-subagent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Complexity-routed subagent delegation for DeepSeek Harness: the model picks a configured runtime tier (provider, model, max tokens, reasoning effort) per delegation, with per-tier spawn chains.",
   "license": "MIT",
   "type": "module",
@@ -11,7 +11,7 @@
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./client": "./client/client.cjs",
+    "./client": "./client/client.js",
     "./package.json": "./package.json"
   },
   "dsh": {
@@ -46,7 +46,7 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsdown",
+    "build": "tsc -p tsconfig.json && tsdown && node scripts/copy-client-cjs.mjs",
     "build:host": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
