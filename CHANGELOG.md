@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.3
+
+- React stays **external**: the shell seeds it as a platform singleton, and
+  bundling it dragged Node-only `process.env` checks into the page
+  (`process is not defined` at import).
+
 ## 0.2.2
 
 - Ship the client bundle under both names the two consumers resolve:
