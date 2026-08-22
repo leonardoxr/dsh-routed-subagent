@@ -15,10 +15,24 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
 import type { ContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SubagentProvider, SubagentResult, SubagentRun } from '@deepseek-ai/dsh-subagent'
 import { allowedTiersFor, parseTierTable, rootTierNames, type TierTable } from './tiers.ts'
+
+/** Settings namespace carrying the user-editable tier table. */
+export const ROUTED_SUBAGENT_SETTINGS_NAMESPACE = settingsNamespace('routed-subagent')
+
+/**
+ * Settings section schema: the tier table a user owns in Settings → Plugins.
+ * Loose at the schema layer (Schemastery mappings are narrow); the section
+ * validator applies the strict tier-table rules on every write.
+ */
+export const SETTINGS_SCHEMA: z<{ tiers?: unknown; rootTiers?: unknown }> = z.object({
+  tiers: z.any().default({}),
+  rootTiers: z.any(),
+})
 
 export const name = 'routed-subagent'
 export const inject = ['subagents', 'tools']
@@ -126,8 +140,8 @@ function toolDescription(toolName: string, tiers: TierTable, roots: readonly str
 }
 
 export function apply(ctx: Context, config: Config): void {
-  const tiers = parseTierTable(config.tiers)
-  const roots = rootTierNames(tiers, config.rootTiers)
+  let tiers = parseTierTable(config.tiers)
+  let roots = rootTierNames(tiers, config.rootTiers)
   const toolName = config.toolName ?? 'routed_subagent'
   const providerName = config.providerName ?? 'spawn'
   const backgroundEnabled = config.enableRunInBackground !== false
@@ -135,6 +149,35 @@ export function apply(ctx: Context, config: Config): void {
 
   // Which tier each live spawned child runs under — the spawn-chain authority.
   const childTiers = new WeakMap<Agent, string>()
+
+  let disposeTool: (() => void) | undefined
+  let mountedProvider: SubagentProvider | undefined
+  // Re-register the tool so its description (the tier menu the model reads)
+  // reflects the current table. No-op when nothing is mounted yet.
+  const remount = (): void => {
+    if (disposeTool === undefined) return
+    disposeTool()
+    disposeTool = undefined
+    if (mountedProvider !== undefined) mount(mountedProvider)
+  }
+
+  // In-app editing: Settings → Plugins → routed-subagent edits the tier table
+  // in the settings user layer; this installer resolves schema defaults over
+  // the composition entry and points the source at the resolved scope.
+  installSettingsSection(ctx, ROUTED_SUBAGENT_SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { tiers: config.tiers }, {
+    setSource(current) {
+      const section = current() as { tiers?: unknown }
+      tiers = parseTierTable(section.tiers)
+      roots = rootTierNames(tiers, config.rootTiers)
+    },
+    onChange() {
+      remount()
+    },
+    validate(value) {
+      const table = parseTierTable((value as { tiers?: unknown }).tiers)
+      rootTierNames(table, config.rootTiers)
+    },
+  })
 
   // Reasoning effort follows the tier on every child request. Root-level
   // listener: scope-filtered dispatch delivers all agents here, and the
@@ -146,8 +189,6 @@ export function apply(ctx: Context, config: Config): void {
     if (effort === undefined || call.reasoningEffort === effort) return call
     return { ...call, reasoningEffort: effort }
   })
-
-  let disposeTool: (() => void) | undefined
   const mount = (provider: SubagentProvider): void => {
     if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) {
       throw new Error(
@@ -155,6 +196,7 @@ export function apply(ctx: Context, config: Config): void {
         + " — set maxDepth: 'provider-managed' to leave the recursion budget to the provider",
       )
     }
+    mountedProvider = provider
     const mounted = `routed-subagent: "${toolName}" mounted on provider "${provider.name}" — tiers: ${roots.join(', ')}`
     if (ctx.logger?.info) ctx.logger.info(mounted)
     else console.log(`[routed-subagent] ${mounted}`)

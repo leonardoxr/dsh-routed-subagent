@@ -9,8 +9,15 @@ Built only on public Harness seams (`ctx.subagents.start()` per-start
 `agentOptions`, the agent-scoped `agent/request` waterfall). No upstream source
 changes; works on CLI, plain `dsh web`, and community desktop distributions.
 
-## Install
+## Configure in the app
 
+After install, **Settings → Plugins → Routed subagent** edits the tier table
+in place — a JSON editor over the `tiers` mapping with staged save, reload,
+and reset-to-composition. Saved edits apply to new delegations immediately;
+no restart. Structural identity (`toolName`, `providerName`, `maxDepth`)
+stays in composition.
+
+## Install
 ```sh
 dsh plugin --profile <your-profile> add dsh-routed-subagent   # once published
 # or straight from a git checkout / packed tarball:
