@@ -1,6 +1,6 @@
 {
   "name": "dsh-routed-subagent",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Complexity-routed subagent delegation for DeepSeek Harness: the model picks a configured runtime tier (provider, model, max tokens, reasoning effort) per delegation, with per-tier spawn chains.",
   "license": "MIT",
   "type": "module",

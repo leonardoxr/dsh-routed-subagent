@@ -13,9 +13,36 @@ const NS = 'routed-subagent'
 /** The subset of the settings scope this card drives. */
 interface BoundScope {
   /** Current resolved section: schema defaults, then composition, then user layer. */
-  get(): unknown
-  /** Replace the user layer wholesale; absent keys re-inherit composition. */
-  replace(section: object): Promise<void>
+  getSnapshot(): {
+    value: { tiers?: unknown } | undefined
+  }
+  /** Write one user-layer field. */
+  set(field: string, value: unknown): Promise<void>
+  /** Clear one user-layer field so it re-inherits composition. */
+  unset(field: string): Promise<void>
+}
+
+/** Serialize the currently resolved tier table for the editor. */
+export function tierDraft(scope: BoundScope): string {
+  return JSON.stringify({ tiers: scope.getSnapshot().value?.tiers ?? {} }, null, 2)
+}
+
+/** Validate and persist one editor draft through the public client scope API. */
+export async function saveTierDraft(scope: BoundScope, draft: string): Promise<boolean> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(draft)
+  } catch {
+    return false
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed) || !Object.hasOwn(parsed, 'tiers')) return false
+  await scope.set('tiers', (parsed as { tiers: unknown }).tiers)
+  return true
+}
+
+/** Clear the tier override so composition supplies it again. */
+export async function resetTierDraft(scope: BoundScope): Promise<void> {
+  await scope.unset('tiers')
 }
 
 /** The client cordis context shape this plugin relies on. */
@@ -70,23 +97,16 @@ interface TiersCardProps {
  */
 function TiersCard(props: TiersCardProps) {
   const { t, scope } = props
-  const [draft, setDraft] = useState((): string => {
-    const current = scope.get() as { tiers?: unknown }
-    return JSON.stringify({ tiers: current.tiers ?? {} }, null, 2)
-  })
+  const [draft, setDraft] = useState(() => tierDraft(scope))
   const [status, setStatus] = useState('')
 
   const save = async (): Promise<void> => {
-    let parsed: unknown
     try {
-      parsed = JSON.parse(draft)
-    } catch {
-      setStatus(t('invalidJson'))
-      return
-    }
-    try {
-      await scope.replace({ tiers: parsed })
-      setDraft(JSON.stringify(parsed, null, 2))
+      if (!await saveTierDraft(scope, draft)) {
+        setStatus(t('invalidJson'))
+        return
+      }
+      setDraft(tierDraft(scope))
       setStatus(t('saved'))
     } catch (reason) {
       setStatus(t('saveFailed') + String(reason instanceof Error ? reason.message : reason))
@@ -94,16 +114,14 @@ function TiersCard(props: TiersCardProps) {
   }
 
   const reload = (): void => {
-    const current = scope.get() as { tiers?: unknown }
-    setDraft(JSON.stringify({ tiers: current.tiers ?? {} }, null, 2))
+    setDraft(tierDraft(scope))
     setStatus('')
   }
 
   const reset = async (): Promise<void> => {
     try {
-      await scope.replace({})
-      const current = scope.get() as { tiers?: unknown }
-      setDraft(JSON.stringify({ tiers: current.tiers ?? {} }, null, 2))
+      await resetTierDraft(scope)
+      setDraft(tierDraft(scope))
       setStatus('')
     } catch (reason) {
       setStatus(String(reason))

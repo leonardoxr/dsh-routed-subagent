@@ -17,6 +17,10 @@ and reset-to-composition. Saved edits apply to new delegations immediately;
 no restart. Structural identity (`toolName`, `providerName`, `maxDepth`)
 stays in composition.
 
+The editor uses the Harness client settings-scope contract (`getSnapshot`,
+`set`, and `unset`), so it requires the browser half bundled with current DSH
+releases.
+
 ## Install
 ```sh
 dsh plugin --profile <your-profile> add dsh-routed-subagent   # once published
@@ -40,20 +44,21 @@ may hire:
     tiers:
       gpt-fast:
         provider: openai-codex        # your codex subscription route
-        model: gpt-5-mini
+        model: gpt-5.4-mini
         maxTokens: 16384
         guidance: 'Lookups, mechanical edits, single-file changes, summarization.'
       gpt-deep:
         provider: openai-codex
-        model: gpt-5.2
+        model: gpt-5.6-sol
         maxTokens: 65536
         reasoningEffort: high         # applied via the agent/request waterfall
         guidance: 'Multi-step reasoning, architecture, hard debugging.'
         spawnable: [gpt-fast]         # deep children may hire fast helpers only
-      local-cheap:
-        provider: deepseek
-        model: deepseek-chat
-        maxTokens: 8192
+      gpt-cheap:
+        provider: openai-codex
+        model: gpt-5.6-luna
+        maxTokens: 16384
+        guidance: 'Lower-cost Codex work where speed matters more than deep reasoning.'
 ```
 
 Per-agent menus come from composition: mount this row (with different
