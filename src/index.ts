@@ -155,6 +155,9 @@ export function apply(ctx: Context, config: Config): void {
         + " — set maxDepth: 'provider-managed' to leave the recursion budget to the provider",
       )
     }
+    const mounted = `routed-subagent: "${toolName}" mounted on provider "${provider.name}" — tiers: ${roots.join(', ')}`
+    if (ctx.logger?.info) ctx.logger.info(mounted)
+    else console.log(`[routed-subagent] ${mounted}`)
     disposeTool = ctx.tools.register(defineTool({
       name: toolName,
       description: toolDescription(toolName, tiers, roots),
