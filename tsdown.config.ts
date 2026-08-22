@@ -5,8 +5,10 @@ import { defineConfig } from 'tsdown'
 // React entry on all supported hosts).
 //
 // The loader contract requires every bundle to register itself through
-// window.__ModuleLoader__.load({ id, factory }): the banner opens the factory,
-// the CJS body populates `module.exports`, and the footer hands it back.
+// window.__ModuleLoader__.load({ id, factory }). The loader invokes the
+// factory with only `require`, so the wrapper declares its own module/exports
+// pair for the CJS body to populate. outExtensions forces a .js name because
+// the served URL is fixed at /plugins/<id>/client.js.
 const id = 'dsh-routed-subagent'
 
 export default defineConfig({
@@ -15,6 +17,8 @@ export default defineConfig({
   format: 'cjs',
   platform: 'browser',
   target: 'es2022',
-  banner: `__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: function (require, module, exports) {`,
+  outExtensions: () => ({ js: '.js' }),
+  banner: `__ModuleLoader__.load({ id: ${JSON.stringify(id)}, factory: function (require) {`
+    + ` const module = { exports: {} }; const exports = module.exports;`,
   footer: `return module.exports; } });`,
 })
