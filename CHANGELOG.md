@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- **Breaking:** replace fixed runtime tiers with configured model policies. Every
+  tool call now chooses required `model` and `reasoning_effort` values.
+- Validate exact provider/model/effort combinations through the public LLM
+  runtime before creating a child; arbitrary model passthrough is rejected.
+- Add strict policy parsing, finite depth limits, fail-closed recursive authority,
+  immutable per-child selections, and generation invalidation on settings changes.
+- Return the effective model selection from foreground and background calls.
+- Replace the tier settings builder with a catalog-backed editor for the complete
+  router configuration: tool name, background mode, depth, editable root models,
+  model policies, and multi-select reasoning allowlists.
+
+
 ## 0.2.3
 
 - React stays **external**: the shell seeds it as a platform singleton, and

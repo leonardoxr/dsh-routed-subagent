@@ -1,4 +1,4 @@
-/** Session-independent model catalog used by the tier editor. */
+/** Session-independent model catalog used by the model policy editor. */
 export interface CatalogReasoningEffort {
   id: string
   name: string
@@ -68,27 +68,48 @@ export function catalogModel(
   return providerGroup(groups, provider)?.models.find(candidate => candidate.id === model)
 }
 
-/** Selection adopted when a provider changes: its first advertised model and exact-model default effort. */
+/** Selection adopted when a provider changes: first model and every advertised effort. */
 export function providerDefaults(
   groups: readonly CatalogProviderGroup[],
   provider: string,
-): { provider: string; model: string; reasoningEffort: string } {
+): { provider: string; model: string; reasoningEfforts: string[] } {
   const model = providerGroup(groups, provider)?.models[0]
   return {
     provider,
     model: model?.id ?? '',
-    reasoningEffort: model?.reasoning?.defaultEffort ?? '',
+    reasoningEfforts: model?.reasoning?.efforts.map(effort => effort.id) ?? [],
   }
 }
 
-/** Exact-model default adopted when the model changes, mirroring the chat picker. */
+/** Provider edit that remains usable when the catalog is absent or advisory. */
+export function providerChoice(
+  groups: readonly CatalogProviderGroup[],
+  provider: string,
+): { provider: string; model: string; reasoningEfforts: string[] } {
+  return providerGroup(groups, provider) === undefined
+    ? { provider, model: '', reasoningEfforts: [] }
+    : providerDefaults(groups, provider)
+}
+
+/** Exact-model selection adopted when the model changes, allowing every advertised effort. */
 export function modelDefaults(
   groups: readonly CatalogProviderGroup[],
   provider: string,
   model: string,
-): { model: string; reasoningEffort: string } {
+): { model: string; reasoningEfforts: string[] } {
   return {
     model,
-    reasoningEffort: catalogModel(groups, provider, model)?.reasoning?.defaultEffort ?? '',
+    reasoningEfforts: catalogModel(groups, provider, model)?.reasoning?.efforts.map(effort => effort.id) ?? [],
   }
+}
+
+/** Model edit that accepts exact custom ids when no catalog entry exists. */
+export function modelChoice(
+  groups: readonly CatalogProviderGroup[],
+  provider: string,
+  model: string,
+): { model: string; reasoningEfforts: string[] } {
+  return catalogModel(groups, provider, model) === undefined
+    ? { model, reasoningEfforts: [] }
+    : modelDefaults(groups, provider, model)
 }

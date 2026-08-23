@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   catalogModel,
   loadModelCatalog,
+  modelChoice,
   modelDefaults,
+  providerChoice,
   providerDefaults,
   providerGroup,
   type ModelCatalogApi,
@@ -56,15 +58,27 @@ describe('model catalog selectors', () => {
     expect(catalogModel(catalog.groups, 'missing', 'sol')).toBeUndefined()
   })
 
-  it('adopts the first provider model and exact-model default effort', () => {
+  it('keeps custom provider and model ids editable without a catalog', () => {
+    expect(providerChoice([], 'private-provider')).toEqual({
+      provider: 'private-provider',
+      model: '',
+      reasoningEfforts: [],
+    })
+    expect(modelChoice([], 'private-provider', 'private/model-v2')).toEqual({
+      model: 'private/model-v2',
+      reasoningEfforts: [],
+    })
+  })
+
+  it('adopts the first provider model and all exact-model reasoning efforts', () => {
     expect(providerDefaults(catalog.groups, 'codex')).toEqual({
       provider: 'codex',
       model: 'mini',
-      reasoningEffort: '',
+      reasoningEfforts: [],
     })
     expect(modelDefaults(catalog.groups, 'codex', 'sol')).toEqual({
       model: 'sol',
-      reasoningEffort: 'high',
+      reasoningEfforts: ['low', 'high'],
     })
   })
 })

@@ -19,6 +19,21 @@ describe('background job settlement', () => {
     expect(run.dispose).toHaveBeenCalledOnce()
   })
 
+  it('maps async tracking failure to failed even after cancellation', async () => {
+    const run = completedRun()
+    const controller = new AbortController()
+    controller.abort()
+    const track = vi.fn(async (candidate: SubagentRun) => {
+      await candidate.dispose()
+      throw new Error('non-local run refused')
+    })
+
+    await expect(settleBackgroundStart(Promise.resolve(run), controller.signal, track))
+      .resolves.toMatchObject({ status: 'failed', detail: expect.stringContaining('non-local run refused') })
+    expect(track).toHaveBeenCalledWith(run)
+    expect(run.dispose).toHaveBeenCalledOnce()
+  })
+
   it('maps startup failure and cancellation without rejecting the job producer', async () => {
     const failed = settleBackgroundStart(Promise.reject(new Error('start failed')), new AbortController().signal)
     await expect(failed).resolves.toMatchObject({ status: 'failed', detail: expect.stringContaining('start failed') })

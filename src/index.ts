@@ -1,112 +1,232 @@
 /**
- * dsh-routed-subagent — complexity-routed subagent delegation.
+ * Configured model-and-reasoning subagent router.
  *
- * Registers a model-facing delegation tool whose input includes a runtime
- * `tier`; each configured tier names the provider, model, token cap, and
- * optional reasoning effort the spawned child runs under, plus the spawn chain
- * that child itself may delegate through. The calling model judges task
- * complexity per delegation and picks accordingly.
- *
- * Built entirely on public seams: `ctx.subagents.start()` already carries
- * per-start {@link AgentOptions}, and the agent-scoped `agent/request`
- * waterfall allows replacing the call config — so reasoning effort follows the
- * tier without any upstream change.
+ * Every delegation call selects one allowlisted model policy and one exact
+ * reasoning effort. The host validates that pair before a local child exists;
+ * immutable child tracking then applies the same selection to every request and
+ * bounds any deeper delegation by model policy and absolute depth.
  */
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool, type JsonValue } from '@deepseek-ai/dsh-tools'
 import { installSettingsSection, settingsNamespace } from '@deepseek-ai/dsh-settings'
 import type { Agent, AgentOptions } from '@deepseek-ai/dsh-agent'
-import { ReasoningEffortId, type ContentBlock } from '@deepseek-ai/dsh-llm'
+import { ReasoningEffortId, type ContentBlock, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { settleRun, type SubagentProvider, type SubagentResult, type SubagentRun } from '@deepseek-ai/dsh-subagent'
-import { allowedTiersFor, parseTierTable, rootTierNames, type TierTable } from './tiers.ts'
+import {
+  allowedModelPolicyIds,
+  parseModelPolicyTable,
+  resolveModelSelection,
+  rootModelPolicyIds,
+  type ModelPolicyTable,
+  type ModelSelection,
+} from './model-policies.ts'
+export type { ModelPolicy, ModelPolicyTable, ModelSelection } from './model-policies.ts'
 
-/** Settings namespace carrying the user-editable tier table. */
+declare module '@deepseek-ai/dsh-agent' {
+  interface AgentOptions {
+    /** Exact process-local correlation for routed child publication. */
+    dshRoutedSubagentToken?: string
+  }
+}
+
+/** Settings namespace carrying every user-editable router option. */
 export const ROUTED_SUBAGENT_SETTINGS_NAMESPACE = settingsNamespace('routed-subagent')
 
-/**
- * Settings section schema: the tier table a user owns in Settings → Plugins.
- * Loose at the schema layer (Schemastery mappings are narrow); the section
- * validator applies the strict tier-table rules on every write.
- */
-export const SETTINGS_SCHEMA: z<{ tiers?: unknown; rootTiers?: unknown }> = z.object({
-  tiers: z.any().default({}),
-  rootTiers: z.any(),
+export interface RoutedSettingsSection {
+  toolName?: string
+  enableRunInBackground?: boolean
+  maxDepth?: unknown
+  models?: unknown
+  rootModels?: unknown
+}
+
+/** Complete router settings section owned by Settings → Plugins. */
+export const SETTINGS_SCHEMA: z<RoutedSettingsSection> = z.object({
+  toolName: z.string().default('routed_subagent'),
+  enableRunInBackground: z.boolean().default(true),
+  maxDepth: z.any().default(1),
+  models: z.any().default({}),
+  rootModels: z.any(),
 })
 
 export const name = 'routed-subagent'
-export const inject = ['subagents', 'tools']
+export const inject = ['subagents', 'tools', 'llm', 'agents']
 
-/** Plugin configuration (cordis.yml row config; flags never reach here). */
+/** Plugin configuration. This is intentionally incompatible with the old tier schema. */
 export interface Config {
-  /** Registered tool name; must not collide with another mounted tool. Default `routed_subagent`. */
+  /** Registered tool name. Default routed_subagent. */
   toolName?: string
-  /** Subagent provider name on `ctx.subagents`. Default `spawn` (the in-process spawn backend). */
-  providerName?: string
-  /** Expose `run_in_background` (default true); disabled instances omit the parameter. */
+  /** Expose run_in_background. Default true. */
   enableRunInBackground?: boolean
-  /**
-   * Absolute delegation-depth cap for children started by this tool, or
-   * `'provider-managed'` to leave recursion budget to the provider. Per-tier
-   * spawn chains bound what deeper delegation may exist at all.
-   */
-  maxDepth?: number | 'provider-managed'
-  /** Tier names top-level agents may use. Defaults to every configured tier. */
-  rootTiers?: string[]
-  /** Required tier table — see README. A missing or invalid table fails the load loudly. */
-  tiers: unknown
+  /** Absolute positive delegation-depth cap. Default 1. */
+  maxDepth?: number
+  /** Required non-empty model-policy ids available to true top-level agents. */
+  rootModels: readonly string[]
+  /** Required model policy allowlist. */
+  models: ModelPolicyTable
 }
 
 export const Config: z<Config> = z.object({
   toolName: z.string().default('routed_subagent'),
-  providerName: z.string().default('spawn'),
   enableRunInBackground: z.boolean().default(true),
-  maxDepth: z.any().default('provider-managed'),
-  rootTiers: z.any(),
-  // Loose at the schema layer because Schemastery's mapping support is narrow;
-  // `parseTierTable` validates strictly and fails the load with an actionable message.
-  tiers: z.any(),
+  maxDepth: z.any().default(1),
+  rootModels: z.any(),
+  models: z.any(),
 })
 
-interface ForegroundToolResult {
+/** Auditable route chosen for one delegation. */
+export type EffectiveSelection = ModelSelection
+
+export interface ForegroundToolResult {
   readonly kind: 'foreground'
   readonly runId: SubagentRun['id']
-  readonly tier: string
+  readonly selection: EffectiveSelection
   readonly output: JsonValue[]
 }
 
-type BackgroundJobOutcome = Awaited<ReturnType<typeof settleRun>>
+export interface BackgroundToolResult {
+  readonly kind: 'background'
+  readonly jobId: string
+  readonly selection: EffectiveSelection
+}
 
-/**
- * Settle a background start into the jobs registry's required terminal outcome.
- * Startup failures never reject the producer promise; cancellation maps to
- * `killed`, while every other startup failure becomes `failed`.
- */
+export type RoutedSubagentToolResult = ForegroundToolResult | BackgroundToolResult
+
+type BackgroundJobOutcome = Awaited<ReturnType<typeof settleRun>>
+type TrackRun = (run: SubagentRun) => SubagentRun | Promise<SubagentRun>
+
+/** Validate the finite absolute depth cap. */
+export function resolveMaxDepth(value: unknown): number {
+  const resolved = value === undefined ? 1 : value
+  if (typeof resolved !== 'number' || !Number.isSafeInteger(resolved) || resolved < 1) {
+    throw new Error('routed-subagent: maxDepth must be a positive safe integer')
+  }
+  return resolved
+}
+
+/** Validate a registered tool name from composition or Settings. */
+export function resolveToolName(value: unknown): string {
+  const resolved = value === undefined ? 'routed_subagent' : value
+  if (typeof resolved !== 'string' || resolved.trim() === '' || resolved !== resolved.trim()
+    || /[\u0000-\u001f\u007f]/u.test(resolved)) {
+    throw new Error('routed-subagent: toolName must be a non-empty trimmed string')
+  }
+  return resolved
+}
+
+export interface RuntimeRouterSettings {
+  readonly toolName: string
+  readonly enableRunInBackground: boolean
+  readonly maxDepth: number
+  readonly policies: ModelPolicyTable
+  readonly roots: readonly string[]
+}
+
+/** Parse one complete settings snapshot before it can remount the tool. */
+export function resolveRuntimeRouterSettings(value: RoutedSettingsSection): RuntimeRouterSettings {
+  const policies = parseModelPolicyTable(value.models)
+  return {
+    toolName: resolveToolName(value.toolName),
+    enableRunInBackground: value.enableRunInBackground !== false,
+    maxDepth: resolveMaxDepth(value.maxDepth),
+    policies,
+    roots: rootModelPolicyIds(policies, value.rootModels),
+  }
+}
+
+export interface CallConfigResolver {
+  resolveCallConfig(config: LlmCallConfig, signal?: AbortSignal): Promise<LlmCallConfig>
+}
+
+/** Validate one configured pair authoritatively and derive child AgentOptions. */
+export async function validateExactModelSelection(
+  resolver: CallConfigResolver,
+  requested: EffectiveSelection,
+  maxTokens: number | undefined,
+  signal?: AbortSignal,
+): Promise<{ selection: EffectiveSelection; agentOptions: AgentOptions }> {
+  const resolved = await resolver.resolveCallConfig({
+    provider: requested.provider,
+    model: requested.model,
+    reasoningEffort: ReasoningEffortId(requested.reasoningEffort),
+    ...(maxTokens === undefined ? {} : { maxTokens }),
+  }, signal)
+  if (resolved.provider !== requested.provider
+    || resolved.model !== requested.model
+    || resolved.reasoningEffort !== requested.reasoningEffort) {
+    throw new Error('routed-subagent: adapter resolved a different explicit model selection')
+  }
+  return {
+    selection: requested,
+    agentOptions: {
+      provider: resolved.provider,
+      model: resolved.model,
+      ...(resolved.maxTokens === undefined ? {} : { maxTokens: resolved.maxTokens }),
+    },
+  }
+}
+
+/** Pin one tracked child's immutable provider/model/effort choice on a request. */
+export function pinModelSelection(call: LlmCallConfig, selection: EffectiveSelection): LlmCallConfig {
+  const effort = ReasoningEffortId(selection.reasoningEffort)
+  if (call.provider === selection.provider && call.model === selection.model && call.reasoningEffort === effort) {
+    return call
+  }
+  return { ...call, provider: selection.provider, model: selection.model, reasoningEffort: effort }
+}
+
+/** Serialize only provider publication for one parent while child runs remain concurrent. */
+export class PerAgentStartGate {
+  private readonly tails = new WeakMap<object, Promise<void>>()
+
+  async run<T>(owner: object, task: () => Promise<T>): Promise<T> {
+    const previous = this.tails.get(owner) ?? Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.then(() => gate)
+    this.tails.set(owner, tail)
+    await previous
+    try {
+      return await task()
+    } finally {
+      release()
+      if (this.tails.get(owner) === tail) this.tails.delete(owner)
+    }
+  }
+}
+
+/** Settle a background start into the jobs registry's terminal outcome. */
 export async function settleBackgroundStart(
   start: Promise<SubagentRun>,
   signal: AbortSignal,
-  track: (run: SubagentRun) => SubagentRun = run => run,
+  track: TrackRun = run => run,
 ): Promise<BackgroundJobOutcome> {
+  let run: SubagentRun
   try {
-    return await settleRun(track(await start))
+    run = await start
   } catch (error) {
     return signal.aborted && !(error instanceof AggregateError)
       ? { status: 'killed' }
       : { status: 'failed', detail: String(error) }
   }
+  try {
+    return await settleRun(await track(run))
+  } catch (error) {
+    return { status: 'failed', detail: String(error) }
+  }
 }
-/**
- * Collect and release one foreground run without letting disposal replace an
- * independent result failure (mirrors the stock tool adapter). `tier` rides
- * along so the canonical value names the runtime that produced the output.
- */
-async function settleForegroundRun(run: SubagentRun, tier: string): Promise<ForegroundToolResult> {
-  // The published 0.0.1-rc.x SubagentResult predates the diagnostic field;
-  // detect it so newer runtimes light the path up without a breaking bump here.
+
+/** Collect and release one foreground run while preserving independent failures. */
+async function settleForegroundRun(
+  run: SubagentRun,
+  selection: EffectiveSelection,
+): Promise<ForegroundToolResult> {
   const diagnosticOf = (result: SubagentResult): string | undefined => {
     if (!('diagnostic' in result)) return undefined
     const value: unknown = result.diagnostic
-    return typeof value === 'string' ? value : undefined
+    return typeof value === 'string' ? value.slice(0, 4000) : undefined
   }
   const [execution] = await Promise.allSettled([
     run.result.then((result) => {
@@ -114,21 +234,19 @@ async function settleForegroundRun(run: SubagentRun, tier: string): Promise<Fore
         return {
           kind: 'foreground' as const,
           runId: run.id,
-          tier,
-          // Content blocks cross the tool boundary as their JSON wire shape.
+          selection,
           output: result.output as unknown as JsonValue[],
         }
       }
-      // Non-completed means partial output is not success, but the preserved
-      // partial answer still reaches the parent via the thrown message.
       const diagnostic = diagnosticOf(result)
-      const diagnosticText = diagnostic === undefined ? '' : `\nDiagnostic: ${diagnostic}`
+      const diagnosticText = diagnostic === undefined ? '' : '\nDiagnostic: ' + diagnostic
       const text = result.output
         .filter((block): block is Extract<ContentBlock, { type: 'text' }> => block.type === 'text')
         .map(block => block.text)
         .join('')
-      const partial = text.length === 0 ? '' : `\nPartial output before the run ended:\n${text}`
-      throw new Error(`subagent run ended abnormally (${result.stopReason})${diagnosticText}${partial}`)
+        .slice(0, 8000)
+      const partial = text.length === 0 ? '' : '\nPartial output before the run ended:\n' + text
+      throw new Error('subagent run ended abnormally (' + result.stopReason + ')' + diagnosticText + partial)
     }),
   ])
   const [disposal] = await Promise.allSettled([Promise.resolve().then(() => run.dispose())])
@@ -136,7 +254,7 @@ async function settleForegroundRun(run: SubagentRun, tier: string): Promise<Fore
     if (disposal.status === 'rejected') {
       throw new AggregateError(
         [execution.reason, disposal.reason],
-        `subagent run failed: ${String(execution.reason)}; dispose failed: ${String(disposal.reason)}`,
+        'subagent run failed: ' + String(execution.reason) + '; dispose failed: ' + String(disposal.reason),
       )
     }
     throw execution.reason
@@ -145,86 +263,160 @@ async function settleForegroundRun(run: SubagentRun, tier: string): Promise<Fore
   return execution.value
 }
 
-/** Compose the static tool description: the routing contract plus the root tier menu. */
-function toolDescription(toolName: string, tiers: TierTable, roots: readonly string[]): string {
-  const menu = roots.map((tierName) => {
-    const tier = tiers[tierName]
-    if (tier === undefined) return tierName
-    const guidance = tier.guidance ?? `${tier.provider}/${tier.model}`
-    return `- "${tierName}": ${guidance}`
+function modelMenu(policies: ModelPolicyTable, roots: readonly string[]): string {
+  return roots.map((policyId) => {
+    const policy = policies[policyId]
+    if (policy === undefined) return '- "' + policyId + '"'
+    const description = policy.description === undefined ? '' : ' — ' + policy.description
+    return '- "' + policyId + '": ' + policy.provider + '/' + policy.model
+      + '; reasoning_effort: [' + policy.reasoningEfforts.join(', ') + ']' + description
   }).join('\n')
-  return 'Delegate a self-contained task to a subagent running on the runtime you pick with `tier`. '
-    + 'Judge the delegated work honestly: simple lookups, mechanical edits, single-file changes, or '
-    + 'summarization belong on a cheap fast tier; multi-step reasoning, architecture decisions, and hard '
-    + 'debugging justify an expensive deep tier. The subagent works in its own context and returns its '
-    + `result, not its intermediate steps, so give it a complete standalone prompt.\nTiers:\n${menu}\n`
-    + `Deeper delegation may be restricted: a spawned child sees only the tiers its tier permits.`
+}
+
+/** Compose the routing contract and configured root menu the calling model reads. */
+export function toolDescription(policies: ModelPolicyTable, roots: readonly string[]): string {
+  return 'Delegate a self-contained task to a local subagent. You must choose both a configured model policy '
+    + 'with model and one of that policy\'s explicit reasoning efforts with reasoning_effort on every call. '
+    + 'Use cheaper/faster choices for mechanical work and deeper effort only when complexity justifies it. '
+    + 'The child works in its own context and returns its result, not intermediate reasoning, so provide a '
+    + 'complete standalone prompt.\nAvailable model policies:\n' + modelMenu(policies, roots) + '\n'
+    + 'Deeper delegation is fail-closed and may expose a narrower model list.'
+}
+
+interface TrackedChild {
+  readonly generation: number
+  readonly selection: EffectiveSelection
+}
+
+interface PendingChild extends TrackedChild {
+  readonly token: string
+}
+
+function selectionSchema() {
+  return {
+    type: 'object' as const,
+    required: true,
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string' as const, required: true },
+      provider: { type: 'string' as const, required: true },
+      model: { type: 'string' as const, required: true },
+      reasoningEffort: { type: 'string' as const, required: true },
+    },
+  } as const
 }
 
 export function apply(ctx: Context, config: Config): void {
-  let tiers = parseTierTable(config.tiers)
-  let roots = rootTierNames(tiers, config.rootTiers)
-  const toolName = config.toolName ?? 'routed_subagent'
-  const providerName = config.providerName ?? 'spawn'
-  const backgroundEnabled = config.enableRunInBackground !== false
-  const maxDepth = typeof config.maxDepth === 'number' ? config.maxDepth : undefined
+  const fallback: RoutedSettingsSection = {
+    toolName: resolveToolName(config.toolName),
+    enableRunInBackground: config.enableRunInBackground !== false,
+    maxDepth: resolveMaxDepth(config.maxDepth),
+    models: config.models,
+    rootModels: config.rootModels,
+  }
+  let settings = resolveRuntimeRouterSettings(fallback)
+  let readSettings: () => unknown = () => fallback
+  let generation = 0
+  const providerName = 'spawn'
 
-  // Which tier each live spawned child runs under — the spawn-chain authority.
-  const childTiers = new WeakMap<Agent, string>()
-
+  const childPolicies = new WeakMap<Agent, TrackedChild>()
+  const pendingStarts = new WeakMap<Agent, PendingChild>()
+  const startGate = new PerAgentStartGate()
   let disposeTool: (() => void) | undefined
   let mountedProvider: SubagentProvider | undefined
-  // Re-register the tool so its description (the tier menu the model reads)
-  // reflects the current table. No-op when nothing is mounted yet.
+
   const remount = (): void => {
-    if (disposeTool === undefined) return
-    disposeTool()
+    const next = resolveRuntimeRouterSettings(readSettings() as RoutedSettingsSection)
+    const provider = mountedProvider
+    const previousDispose = disposeTool
+    if (provider === undefined || previousDispose === undefined) {
+      settings = next
+      generation += 1
+      return
+    }
+
+    const previous = settings
+    if (next.toolName !== previous.toolName) {
+      // Different names can be registered atomically. A collision leaves the
+      // old registration untouched.
+      const nextDispose = registerTool(provider, next)
+      previousDispose()
+      disposeTool = nextDispose
+      settings = next
+      generation += 1
+      return
+    }
+
+    // The registry cannot hold two tools with the same name. Restore the exact
+    // previous registration if replacement fails after disposal.
+    previousDispose()
     disposeTool = undefined
-    if (mountedProvider !== undefined) mount(mountedProvider)
+    try {
+      const nextDispose = registerTool(provider, next)
+      disposeTool = nextDispose
+      settings = next
+      generation += 1
+    } catch (error) {
+      try {
+        disposeTool = registerTool(provider, previous)
+      } catch (restoreError) {
+        throw new AggregateError([error, restoreError], 'routed-subagent: tool remount and rollback both failed')
+      }
+      throw error
+    }
   }
 
-  // In-app editing: Settings → Plugins → routed-subagent edits the tier table
-  // in the settings user layer; this installer resolves schema defaults over
-  // the composition entry and points the source at the resolved scope.
-  installSettingsSection(ctx, ROUTED_SUBAGENT_SETTINGS_NAMESPACE, SETTINGS_SCHEMA, { tiers: config.tiers }, {
+  installSettingsSection(ctx, ROUTED_SUBAGENT_SETTINGS_NAMESPACE, SETTINGS_SCHEMA, fallback, {
     setSource(current) {
-      const section = current() as { tiers?: unknown }
-      tiers = parseTierTable(section.tiers)
-      roots = rootTierNames(tiers, config.rootTiers)
+      readSettings = current
     },
     onChange() {
       remount()
     },
     validate(value) {
-      const table = parseTierTable((value as { tiers?: unknown }).tiers)
-      rootTierNames(table, config.rootTiers)
+      const next = resolveRuntimeRouterSettings(value as RoutedSettingsSection)
+      if (next.toolName === 'run_code') {
+        throw new Error('routed-subagent: toolName "run_code" is reserved')
+      }
+      if (next.toolName !== settings.toolName && ctx.tools.get(next.toolName) !== undefined) {
+        throw new Error('routed-subagent: toolName "' + next.toolName + '" is already registered')
+      }
     },
   })
 
-  // Reasoning effort follows the tier on every child request. Root-level
-  // listener: scope-filtered dispatch delivers all agents here, and the
-  // WeakMap narrows to children this plugin started.
-  ctx.on('agent/request', async (_payload, next) => {
-    const call = await next()
-    const tierName = childTiers.get(_payload.agent)
-    const effort = tierName === undefined ? undefined : tiers[tierName]?.reasoningEffort
-    if (effort === undefined || call.reasoningEffort === effort) return call
-    return { ...call, reasoningEffort: ReasoningEffortId(effort) }
+  // The package-specific AgentOptions token survives local child option
+  // resolution. Bind the exact new Agent at publication, before session startup
+  // and its first request; parent identity alone is deliberately insufficient.
+  ctx.on('agent/created', ({ agent }) => {
+    const token = agent.options.dshRoutedSubagentToken
+    const parentId = agent.session.header.parentSession
+    if (token === undefined || parentId === undefined) return
+    const parent = ctx.agents.get(parentId)
+    const pending = parent === undefined ? undefined : pendingStarts.get(parent)
+    if (parent === undefined
+      || pending === undefined
+      || pending.token !== token
+      || !ctx.agents.isOwnedBy(agent.session.header.id, parent)) return
+    childPolicies.set(agent, { generation: pending.generation, selection: pending.selection })
   })
-  const mount = (provider: SubagentProvider): void => {
-    if (typeof config.maxDepth === 'number' && !provider.capabilities.depthLimit) {
-      throw new Error(
-        `routed-subagent: provider "${provider.name}" cannot enforce maxDepth (no depthLimit capability)`
-        + " — set maxDepth: 'provider-managed' to leave the recursion budget to the provider",
-      )
+
+  // AgentOptions cannot carry reasoning effort. Apply each immutable child choice
+  // at request time, also pinning provider/model against unrelated waterfalls.
+  ctx.on('agent/request', async (payload, next) => {
+    const call = await next()
+    const tracked = childPolicies.get(payload.agent)
+    if (tracked === undefined) return call
+    return pinModelSelection(call, tracked.selection)
+  })
+
+  const registerTool = (provider: SubagentProvider, active: RuntimeRouterSettings): (() => void) => {
+    const { toolName, enableRunInBackground: backgroundEnabled, maxDepth, policies, roots } = active
+    if (!provider.capabilities.depthLimit) {
+      throw new Error('routed-subagent: local spawn provider cannot enforce maxDepth')
     }
-    mountedProvider = provider
-    const mounted = `routed-subagent: "${toolName}" mounted on provider "${provider.name}" — tiers: ${roots.join(', ')}`
-    if (ctx.logger?.info) ctx.logger.info(mounted)
-    else console.log(`[routed-subagent] ${mounted}`)
-    disposeTool = ctx.tools.register(defineTool({
+    const dispose = ctx.tools.register(defineTool({
       name: toolName,
-      description: toolDescription(toolName, tiers, roots),
+      description: toolDescription(policies, roots),
       parameters: {
         description: {
           type: 'string',
@@ -234,24 +426,22 @@ export function apply(ctx: Context, config: Config): void {
         prompt: {
           type: 'string',
           required: true,
-          description:
-            'The complete, self-contained task for the subagent. It does not share this '
-            + "conversation's context, so include everything it needs.",
+          description: 'The complete standalone task. The child does not share the parent conversation.',
         },
-        tier: {
+        model: {
           type: 'string',
           required: true,
-          description:
-            'Runtime tier for this delegation, chosen by judging task complexity against the '
-            + 'described tradeoffs. Availability can be narrower deeper in a delegation chain; '
-            + 'an error names the tiers valid in the current context.',
+          description: 'Configured model policy id for this delegation. Choose only from the advertised menu.',
+        },
+        reasoning_effort: {
+          type: 'string',
+          required: true,
+          description: 'Exact effort id allowlisted for the selected model. This choice is required per call.',
         },
         ...backgroundEnabled ? {
           run_in_background: {
             type: 'boolean' as const,
-            description:
-              'Whether to run as a background job and return its id. Defaults to false; '
-              + 'collect with job_output or stop with job_kill.',
+            description: 'Run as a background job and return its id. Defaults to false.',
           },
         } : {},
       },
@@ -264,6 +454,7 @@ export function apply(ctx: Context, config: Config): void {
               properties: {
                 kind: { type: 'string', required: true, const: 'background' },
                 jobId: { type: 'string', required: true },
+                selection: selectionSchema(),
               },
             },
             {
@@ -272,55 +463,105 @@ export function apply(ctx: Context, config: Config): void {
               properties: {
                 kind: { type: 'string', required: true, const: 'foreground' },
                 runId: { type: 'string', required: true },
-                tier: { type: 'string', required: true },
+                selection: selectionSchema(),
                 output: { type: 'array', required: true, items: { type: 'json' } },
               },
             },
           ],
         },
         render: (_args, value) => {
+          const selected = value.selection
+          const route = String(selected.id) + ' => ' + String(selected.provider) + '/' + String(selected.model)
+            + ' @ ' + String(selected.reasoningEffort)
           if (value.kind === 'background') {
-            return [{ type: 'text', text: `started background subagent job ${value.jobId}` }]
+            return [{ type: 'text', text: 'started background subagent job ' + value.jobId + ' [' + route + ']' }]
           }
           const text = (value.output as { text?: string }[])
             .map(block => (typeof block?.text === 'string' ? block.text : JSON.stringify(block)))
             .join('')
-          return [{ type: 'text', text: `subagent [${String(value.tier)}] ${String(value.runId)}\n${text}` }]
+          return [{ type: 'text', text: 'subagent [' + route + '] ' + String(value.runId) + '\n' + text }]
         },
       },
       isConcurrencySafe: () => true,
       async execute(args, exec) {
+        const allowedArguments = new Set([
+          'description',
+          'prompt',
+          'model',
+          'reasoning_effort',
+          ...(backgroundEnabled ? ['run_in_background'] : []),
+        ])
+        const unexpected = Object.keys(args).find(key => !allowedArguments.has(key))
+        if (unexpected !== undefined) throw new Error('unexpected argument "' + unexpected + '"')
         const caller = exec.agent
-        if (!caller) {
-          throw new Error('routed subagent requires a calling agent (exec.agent was undefined)')
+        if (!caller) throw new Error('routed subagent requires a calling agent')
+
+        const policySnapshot = policies
+        const rootsSnapshot = roots
+        const selectedGeneration = generation
+        const trackedCaller = childPolicies.get(caller)
+        const delegationDepth = caller.session.header.delegationDepth ?? 0
+        const allowed = allowedModelPolicyIds(
+          policySnapshot,
+          rootsSnapshot,
+          delegationDepth,
+          trackedCaller === undefined
+            ? undefined
+            : { generation: trackedCaller.generation, policyId: trackedCaller.selection.id },
+          selectedGeneration,
+        )
+        const requested = resolveModelSelection(
+          policySnapshot,
+          allowed,
+          args.model,
+          args.reasoning_effort,
+        )
+        const policy = policySnapshot[requested.id]
+        if (policy === undefined) throw new Error('unknown model policy "' + requested.id + '"')
+
+        // Adapter-authoritative exact-model validation happens before child creation.
+        const validated = await validateExactModelSelection(
+          ctx.llm,
+          requested,
+          policy.maxTokens,
+          exec.signal,
+        )
+        if (generation !== selectedGeneration) {
+          throw new Error('routed-subagent configuration changed while validating the model selection; retry the call')
         }
-        const callerTier = childTiers.get(caller)
-        const allowed = allowedTiersFor(tiers, roots, callerTier)
-        if (!allowed.includes(args.tier)) {
-          throw new Error(
-            `tier "${args.tier}" is not available in this context`
-            + `(allowed here: ${allowed.join(', ') || 'none'})`,
-          )
-        }
-        const tier = tiers[args.tier]
-        if (tier === undefined) throw new Error(`unknown tier "${args.tier}"`)
-        const agentOptions: AgentOptions = {
-          provider: tier.provider,
-          model: tier.model,
-          ...(tier.maxTokens !== undefined ? { maxTokens: tier.maxTokens } : {}),
-        }
+        const { selection, agentOptions } = validated
+        const selectionToken = randomUUID()
         const request = {
           label: args.description,
           prompt: [{ type: 'text', text: args.prompt }] as ContentBlock[],
           parent: caller,
-          agentOptions,
-          ...(tier.persona !== undefined ? { persona: tier.persona } : {}),
-          ...(maxDepth !== undefined ? { maxDepth } : {}),
+          agentOptions: { ...agentOptions, dshRoutedSubagentToken: selectionToken },
+          maxDepth,
         }
-        const track = (run: SubagentRun): SubagentRun => {
-          if (run.localAgent !== undefined) childTiers.set(run.localAgent, args.tier)
+        const track = async (run: SubagentRun): Promise<SubagentRun> => {
+          if (run.localAgent === undefined) {
+            await run.dispose()
+            throw new Error('routed-subagent requires the local spawn provider; received a non-local run')
+          }
+          childPolicies.set(run.localAgent, { generation: selectedGeneration, selection })
           return run
         }
+        const start = (signal: AbortSignal): Promise<SubagentRun> => startGate.run(caller, async () => {
+          if (generation !== selectedGeneration) {
+            throw new Error('routed-subagent configuration changed before child start')
+          }
+          const pending: PendingChild = {
+            generation: selectedGeneration,
+            selection,
+            token: selectionToken,
+          }
+          pendingStarts.set(caller, pending)
+          try {
+            return await track(await ctx.subagents.start(providerName, { ...request, signal }))
+          } finally {
+            if (pendingStarts.get(caller) === pending) pendingStarts.delete(caller)
+          }
+        })
 
         if (args.run_in_background === true) {
           const jobs = ctx.get('jobs')
@@ -333,26 +574,34 @@ export function apply(ctx: Context, config: Config): void {
             owner: caller,
             run: () => {
               const controller = new AbortController()
-              const start = ctx.subagents.start(providerName, { ...request, signal: controller.signal })
               return {
                 cancel: (reason?: string) => {
                   controller.abort(reason ?? 'background routed subagent task killed')
                 },
-                done: settleBackgroundStart(start, controller.signal, track),
+                done: settleBackgroundStart(start(controller.signal), controller.signal),
               }
             },
           })
-          return { kind: 'background' as const, jobId: id }
+          return { kind: 'background' as const, jobId: id, selection }
         }
 
-        const run = track(await ctx.subagents.start(providerName, { ...request, signal: exec.signal }))
-        return settleForegroundRun(run, args.tier)
+        const run = await start(exec.signal)
+        return settleForegroundRun(run, selection)
       },
     }))
+    const mounted = 'routed-subagent: "' + toolName + '" mounted on local provider "' + provider.name
+      + '" — root models: ' + roots.join(', ')
+    if (ctx.logger?.info) ctx.logger.info(mounted)
+    else console.log('[routed-subagent] ' + mounted)
+    return dispose
   }
 
-  // Mirror provider lifecycle exactly like the stock adapter: sibling load
-  // order and HMR replacement can change availability while this fiber lives.
+  const mount = (provider: SubagentProvider): void => {
+    const dispose = registerTool(provider, settings)
+    mountedProvider = provider
+    disposeTool = dispose
+  }
+
   ctx.on('subagent/provider-added', (provider) => {
     if (provider.name === providerName && disposeTool === undefined) mount(provider)
   })
@@ -360,11 +609,15 @@ export function apply(ctx: Context, config: Config): void {
     if (removed !== providerName || disposeTool === undefined) return
     disposeTool()
     disposeTool = undefined
+    mountedProvider = undefined
   })
   const present = ctx.subagents.getProvider(providerName)
   if (present !== undefined) {
     mount(present)
   } else {
-    ctx.logger?.info(`routed-subagent: provider "${providerName}" not registered yet; the "${toolName}" tool will register when it appears`)
+    ctx.logger?.info(
+      'routed-subagent: local provider "' + providerName + '" not registered yet; the "'
+      + settings.toolName + '" tool will register when it appears',
+    )
   }
 }

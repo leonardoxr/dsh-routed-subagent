@@ -1,8 +1,14 @@
 {
   "name": "dsh-routed-subagent",
-  "version": "0.2.5",
-  "description": "Complexity-routed subagent delegation for DeepSeek Harness: the model picks a configured runtime tier (provider, model, max tokens, reasoning effort) per delegation, with per-tier spawn chains.",
+  "version": "0.3.0",
+  "description": "Allowlisted subagent routing for DeepSeek Harness: the calling agent dynamically chooses a configured model and exact reasoning effort per delegation.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/leonardoxr/dsh-routed-subagent.git"
+  },
+  "homepage": "https://github.com/leonardoxr/dsh-routed-subagent#readme",
+  "bugs": "https://github.com/leonardoxr/dsh-routed-subagent/issues",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -47,8 +53,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json && tsdown && node scripts/copy-client-cjs.mjs",
-    "build:host": "tsc -p tsconfig.json",
+    "build": "node scripts/clean-host.mjs && tsc -p tsconfig.json && tsdown && node scripts/copy-client-cjs.mjs",
+    "build:host": "node scripts/clean-host.mjs && tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "prepack": "npm run build && npm test",
@@ -56,10 +62,10 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6",
-    "@deepseek-ai/dsh-llm": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-agent": ">=0.1.1-rc.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.1-rc.2",
     "@deepseek-ai/dsh-settings": ">=0.1.0-rc.7",
-    "@deepseek-ai/dsh-subagent": ">=0.0.1-rc.1",
+    "@deepseek-ai/dsh-subagent": ">=0.1.1-rc.2",
     "@deepseek-ai/dsh-tools": ">=0.0.1-rc.1",
     "@deepseek-ai/schemastery": "^3.18.1"
   },

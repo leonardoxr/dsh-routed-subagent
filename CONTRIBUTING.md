@@ -10,7 +10,7 @@ registered capabilities dispose automatically with the plugin fiber.
 ```sh
 npm install --legacy-peer-deps   # published dsh packages use loose prerelease peer ranges
 npm run build                    # tsc -> lib/
-npm test                         # vitest unit tests (tier-table logic)
+npm test                         # vitest unit tests (model policy and routing logic)
 npm run typecheck
 ```
 
@@ -23,22 +23,23 @@ npm install.
 ```sh
 npm pack
 dsh plugin --profile <your-profile> add /path/to/dsh-routed-subagent-<version>.tgz
-# add tiers config for row id "routed-subagent" in the profile's cordis.patch.yml
+# add rootModels and models config for row id "routed-subagent" in cordis.patch.yml
 # restart your dsh web instance
 ```
 
-The tool fails the load loudly when `tiers` is missing or invalid — that is
-intentional (misconfiguration never fails silent).
+The tool fails the load loudly when `models`, `rootModels`, or an exact model/effort
+combination is invalid — that is intentional (misconfiguration never fails silent).
 
 ## Pull requests
 
-- One change per PR; keep `src/tiers.ts` pure (no harness imports) so the
-  policy logic stays unit-testable.
-- New config keys need: schema entry, validation in `parseTierTable`/`apply`,
-  README reference-table row, and a test.
+- One change per PR; keep `src/model-policies.ts` pure (no Harness imports) so
+  allowlist and recursive-authority logic stays unit-testable.
+- New config keys need: Host and browser settings schema support, validation in
+  `parseModelPolicyTable`/`resolveRuntimeRouterSettings`, a Settings card control,
+  a README reference-table row, and a test.
 - CI runs typecheck + tests on every push and PR.
 
 ## Reporting issues
 
 Include: harness version (`dsh --version`), install mode (npm global / source),
-the failing tier config (redact provider credentials), and the tool error text.
+the failing model policy (redact provider credentials), and the tool error text.
