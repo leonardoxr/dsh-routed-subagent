@@ -1,6 +1,6 @@
 {
   "name": "dsh-routed-subagent",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Allowlisted subagent routing for DeepSeek Harness: the calling agent dynamically chooses a configured model and exact reasoning effort per delegation.",
   "license": "MIT",
   "repository": {
