@@ -62,10 +62,10 @@ export interface Config {
   enableRunInBackground?: boolean
   /** Absolute positive delegation-depth cap. Default 1. */
   maxDepth?: number
-  /** Required non-empty model-policy ids available to true top-level agents. */
-  rootModels: readonly string[]
-  /** Required model policy allowlist. */
-  models: ModelPolicyTable
+  /** Non-empty model-policy ids available to true top-level agents when enabled. */
+  rootModels?: readonly string[]
+  /** Model policy allowlist. The plugin stays inert until this is configured. */
+  models?: ModelPolicyTable
 }
 
 export const Config: z<Config> = z.object({
@@ -122,6 +122,24 @@ export interface RuntimeRouterSettings {
   readonly maxDepth: number
   readonly policies: ModelPolicyTable
   readonly roots: readonly string[]
+}
+
+function isUnconfiguredRouterSettings(value: RoutedSettingsSection): boolean {
+  const hasModels = value.models !== undefined
+    && (typeof value.models !== 'object' || value.models === null || Array.isArray(value.models)
+      || Object.keys(value.models).length > 0)
+  const hasRoots = value.rootModels !== undefined
+    && (!Array.isArray(value.rootModels) || value.rootModels.length > 0)
+  return !hasModels && !hasRoots
+}
+
+/**
+ * A newly installed router has no safe provider/model policy to expose yet.
+ * Keep its settings card available, but do not register a delegation tool until
+ * the user supplies a complete policy table.
+ */
+export function resolveOptionalRuntimeRouterSettings(value: RoutedSettingsSection): RuntimeRouterSettings | undefined {
+  return isUnconfiguredRouterSettings(value) ? undefined : resolveRuntimeRouterSettings(value)
 }
 
 /** Parse one complete settings snapshot before it can remount the tool. */
@@ -311,10 +329,10 @@ export function apply(ctx: Context, config: Config): void {
     toolName: resolveToolName(config.toolName),
     enableRunInBackground: config.enableRunInBackground !== false,
     maxDepth: resolveMaxDepth(config.maxDepth),
-    models: config.models,
-    rootModels: config.rootModels,
+    models: config.models ?? {},
+    rootModels: config.rootModels ?? [],
   }
-  let settings = resolveRuntimeRouterSettings(fallback)
+  let settings = resolveOptionalRuntimeRouterSettings(fallback)
   let readSettings: () => unknown = () => fallback
   let generation = 0
   const providerName = 'spawn'
@@ -326,16 +344,33 @@ export function apply(ctx: Context, config: Config): void {
   let mountedProvider: SubagentProvider | undefined
 
   const remount = (): void => {
-    const next = resolveRuntimeRouterSettings(readSettings() as RoutedSettingsSection)
+    const next = resolveOptionalRuntimeRouterSettings(readSettings() as RoutedSettingsSection)
     const provider = mountedProvider
     const previousDispose = disposeTool
-    if (provider === undefined || previousDispose === undefined) {
+    if (next === undefined) {
+      previousDispose?.()
+      disposeTool = undefined
+      settings = undefined
+      generation += 1
+      return
+    }
+    if (provider === undefined) {
+      settings = next
+      generation += 1
+      return
+    }
+
+    if (previousDispose === undefined) {
+      disposeTool = registerTool(provider, next)
       settings = next
       generation += 1
       return
     }
 
     const previous = settings
+    if (previous === undefined) {
+      throw new Error('routed-subagent: internal remount state is inconsistent')
+    }
     if (next.toolName !== previous.toolName) {
       // Different names can be registered atomically. A collision leaves the
       // old registration untouched.
@@ -374,11 +409,12 @@ export function apply(ctx: Context, config: Config): void {
       remount()
     },
     validate(value) {
-      const next = resolveRuntimeRouterSettings(value as RoutedSettingsSection)
+      const next = resolveOptionalRuntimeRouterSettings(value as RoutedSettingsSection)
+      if (next === undefined) return
       if (next.toolName === 'run_code') {
         throw new Error('routed-subagent: toolName "run_code" is reserved')
       }
-      if (next.toolName !== settings.toolName && ctx.tools.get(next.toolName) !== undefined) {
+      if (next.toolName !== settings?.toolName && ctx.tools.get(next.toolName) !== undefined) {
         throw new Error('routed-subagent: toolName "' + next.toolName + '" is already registered')
       }
     },
@@ -597,8 +633,12 @@ export function apply(ctx: Context, config: Config): void {
   }
 
   const mount = (provider: SubagentProvider): void => {
-    const dispose = registerTool(provider, settings)
     mountedProvider = provider
+    if (settings === undefined) {
+      ctx.logger?.info('routed-subagent: no model policies configured; configure Settings → Plugins → Routed subagent to enable delegation')
+      return
+    }
+    const dispose = registerTool(provider, settings)
     disposeTool = dispose
   }
 
@@ -606,8 +646,8 @@ export function apply(ctx: Context, config: Config): void {
     if (provider.name === providerName && disposeTool === undefined) mount(provider)
   })
   ctx.on('subagent/provider-removed', (removed) => {
-    if (removed !== providerName || disposeTool === undefined) return
-    disposeTool()
+    if (removed !== providerName) return
+    disposeTool?.()
     disposeTool = undefined
     mountedProvider = undefined
   })
@@ -617,7 +657,7 @@ export function apply(ctx: Context, config: Config): void {
   } else {
     ctx.logger?.info(
       'routed-subagent: local provider "' + providerName + '" not registered yet; the "'
-      + settings.toolName + '" tool will register when it appears',
+      + (settings?.toolName ?? 'routed_subagent') + '" tool will register when it appears',
     )
   }
 }

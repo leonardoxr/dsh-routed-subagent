@@ -1,6 +1,7 @@
 # dsh bundle patch: inserts the routed subagent tool into a profile's layer stack.
 #
-# A later profile patch must replace this row with required rootModels and models.
+# A later profile patch can supply rootModels and models to enable delegation.
+# Without them, the plugin stays inert and leaves its settings card available.
 # Minimal example:
 #
 # - id: routed-subagent

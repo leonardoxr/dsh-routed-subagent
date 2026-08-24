@@ -45,7 +45,18 @@ interface Harness {
   disposeRun: ReturnType<typeof vi.fn>
 }
 
-function harness(): Harness {
+function harness(config: Config = {
+  rootModels: ['sol'],
+  maxDepth: 1,
+  models: {
+    sol: {
+      provider: 'openai-codex',
+      model: 'gpt-5.6-sol',
+      reasoningEfforts: ['medium', 'high'],
+      maxTokens: 32768,
+    },
+  },
+}): Harness {
   const handlers = new Map<string, Function[]>()
   const root = agent('root', 0)
   const child = agent('child', 1, 'root')
@@ -109,18 +120,7 @@ function harness(): Harness {
     logger: { info: vi.fn() },
   } as unknown as Context
 
-  apply(ctx, {
-    rootModels: ['sol'],
-    maxDepth: 1,
-    models: {
-      sol: {
-        provider: 'openai-codex',
-        model: 'gpt-5.6-sol',
-        reasoningEfforts: ['medium', 'high'],
-        maxTokens: 32768,
-      },
-    },
-  } satisfies Config)
+  apply(ctx, config)
   return {
     ctx,
     root,
@@ -141,6 +141,28 @@ describe('mounted routed subagent tool', () => {
     settingsHarness.options = undefined
     settingsHarness.fallback = undefined
     settingsHarness.current = undefined
+  })
+
+  it('stays inert until a newly installed router receives a complete model policy', () => {
+    const app = harness({})
+    expect(app.tool).toBeUndefined()
+    expect(app.registerTool).not.toHaveBeenCalled()
+
+    settingsHarness.current = {
+      ...settingsHarness.fallback,
+      rootModels: ['sol'],
+      models: {
+        sol: {
+          provider: 'openai-codex',
+          model: 'gpt-5.6-sol',
+          reasoningEfforts: ['medium'],
+        },
+      },
+    }
+    settingsHarness.options.validate(settingsHarness.current)
+    settingsHarness.options.onChange()
+
+    expect(app.tool.name).toBe('routed_subagent')
   })
 
   it('requires model and effort and pins the first request before start fulfills', async () => {

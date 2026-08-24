@@ -18,7 +18,7 @@ dsh plugin --profile <your-profile> add C:/path/to/dsh-routed-subagent-0.3.0.tgz
 
 ## Configure
 
-Target the `routed-subagent` row in your profile patch. `models` and `rootModels` are required.
+Target the `routed-subagent` row in your profile patch. `models` and `rootModels` are required to enable delegation. A fresh install without them starts normally and exposes its Settings card, but does not register a delegation tool until you configure a complete policy.
 
 ```yaml
 - id: routed-subagent
