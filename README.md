@@ -1,5 +1,7 @@
 # dsh-routed-subagent
 
+English | [简体中文](README.zh.md)
+
 Allowlisted model-and-reasoning routing for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
 Every delegation call must choose both:
 
